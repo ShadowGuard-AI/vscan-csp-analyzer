@@ -36,6 +36,10 @@ def fetch_csp_header(url):
     """
     try:
         response = requests.get(url, timeout=10, allow_redirects=True)
+        # The second lookup can never add anything: the requests header dict
+        # is case insensitive, so the first get already matched any casing
+        # the server sent. Report-Only policies are not read at all, and a
+        # site testing a policy in report only mode reports as having none.
         csp_header = response.headers.get('Content-Security-Policy') or response.headers.get('content-security-policy')
         if csp_header:
             logging.debug(f"CSP Header found: {csp_header}")
@@ -75,12 +79,20 @@ def analyze_csp(csp_header):
         findings.append("Warning: 'unsafe-inline' is used, which can allow inline script execution.")
     if "unsafe-eval" in csp_header.lower():
         findings.append("Warning: 'unsafe-eval' is used, which can allow execution of strings as code.")
+    # These substring tests scan the whole header text. A data: inside a
+    # report endpoint URL or a quoted string triggers the same warning
+    # as data: granted as a source, and unsafe-inline inside a directive
+    # that has nothing to do with scripts is reported as a script risk.
     if "data:" in csp_header.lower():
         findings.append("Warning: 'data:' is used as a source, which is generally insecure and allows data injection attacks.")
 
     # Check for overly permissive wildcards
     for directive in directives:
         directive = directive.strip()
+        # Directive names are compared case sensitively after the substring
+        # tests above already lowered the header. A Script-Src directive is
+        # skipped by this loop entirely, and the star test inside matches a
+        # subdomain wildcard like *.example.com as if it were a bare star.
         if directive.startswith("script-src") or directive.startswith("default-src"):
             if "*" in directive:
                 findings.append(f"Warning: Wildcard (*) is used in '{directive}', which can be overly permissive.")
@@ -137,6 +149,10 @@ def main():
         print("CSP check failed: the URL could not be fetched, so no analysis was performed.")
         sys.exit(1)
 
+    # The empty string for a missing header is converted to None here to
+    # reuse the missing header message. A server that sends the header
+    # with an empty value, which browsers treat as no policy at all in a
+    # different sense, is indistinguishable in the findings.
     findings = analyze_csp(csp_header if csp_header else None)
 
     if findings:
