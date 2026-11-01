@@ -30,18 +30,19 @@ def fetch_csp_header(url):
         url (str): The URL to fetch the CSP header from.
 
     Returns:
-        str: The CSP header value, or None if not found.  Returns None if an error occurs.
+        str: The CSP header value, an empty string if a response was
+        received but it carried no CSP header, or None if the fetch
+        failed and no response was received.
     """
     try:
-        response = requests.get(url, allow_redirects=True)
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        response = requests.get(url, timeout=10, allow_redirects=True)
         csp_header = response.headers.get('Content-Security-Policy') or response.headers.get('content-security-policy')
         if csp_header:
             logging.debug(f"CSP Header found: {csp_header}")
             return csp_header
         else:
             logging.warning(f"No CSP header found for {url}")
-            return None
+            return ""
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching URL {url}: {e}")
         return None
@@ -132,28 +133,29 @@ def main():
 
     csp_header = fetch_csp_header(args.url)
 
-    if csp_header:
-        findings = analyze_csp(csp_header)
+    if csp_header is None:
+        print("CSP check failed: the URL could not be fetched, so no analysis was performed.")
+        sys.exit(1)
 
-        if findings:
-            print("CSP Analysis Findings:")
-            for finding in findings:
-                print(f"- {finding}")
+    findings = analyze_csp(csp_header if csp_header else None)
 
-            output_string = "\n".join(findings)
+    if findings:
+        print("CSP Analysis Findings:")
+        for finding in findings:
+            print(f"- {finding}")
 
-            if args.output:
-                try:
-                    with open(args.output, "w") as f:
-                        f.write(output_string)
-                    logging.info(f"Results saved to {args.output}")
-                except IOError as e:
-                    logging.error(f"Error writing to file {args.output}: {e}")
+        output_string = "\n".join(findings)
 
-        else:
-            print("No CSP weaknesses found.")
+        if args.output:
+            try:
+                with open(args.output, "w") as f:
+                    f.write(output_string)
+                logging.info(f"Results saved to {args.output}")
+            except IOError as e:
+                logging.error(f"Error writing to file {args.output}: {e}")
+
     else:
-        print("Could not retrieve CSP header.")
+        print("No CSP weaknesses found.")
 
 
 if __name__ == "__main__":
