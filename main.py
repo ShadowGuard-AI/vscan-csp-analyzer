@@ -1,7 +1,6 @@
 import argparse
 import requests
 import logging
-from bs4 import BeautifulSoup
 import sys
 import re
 
@@ -40,7 +39,12 @@ def fetch_csp_header(url):
         # is case insensitive, so the first get already matched any casing
         # the server sent. Report-Only policies are not read at all, and a
         # site testing a policy in report only mode reports as having none.
-        csp_header = response.headers.get('Content-Security-Policy') or response.headers.get('content-security-policy')
+        csp_header = response.headers.get('Content-Security-Policy')
+        if not csp_header:
+            report_only = response.headers.get('Content-Security-Policy-Report-Only')
+            if report_only:
+                logging.warning("Only a Content-Security-Policy-Report-Only header was found; it is not enforced by browsers.")
+                return "REPORT_ONLY: " + report_only
         if csp_header:
             logging.debug(f"CSP Header found: {csp_header}")
             return csp_header
@@ -56,68 +60,43 @@ def fetch_csp_header(url):
 
 
 def analyze_csp(csp_header):
-    """
-    Analyzes a CSP header for potential weaknesses.
-
-    Args:
-        csp_header (str): The CSP header value.
-
-    Returns:
-        list: A list of findings (strings) indicating potential weaknesses.
-    """
     findings = []
-
     if not csp_header:
         findings.append("No CSP header found.")
         return findings
-    
-    # Split the CSP header into directives
-    directives = csp_header.split(';')
-
-    # Check for 'unsafe-inline' and 'unsafe-eval'
-    if "unsafe-inline" in csp_header.lower():
-        findings.append("Warning: 'unsafe-inline' is used, which can allow inline script execution.")
-    if "unsafe-eval" in csp_header.lower():
-        findings.append("Warning: 'unsafe-eval' is used, which can allow execution of strings as code.")
-    # These substring tests scan the whole header text. A data: inside a
-    # report endpoint URL or a quoted string triggers the same warning
-    # as data: granted as a source, and unsafe-inline inside a directive
-    # that has nothing to do with scripts is reported as a script risk.
-    if "data:" in csp_header.lower():
-        findings.append("Warning: 'data:' is used as a source, which is generally insecure and allows data injection attacks.")
-
-    # Check for overly permissive wildcards
-    for directive in directives:
-        directive = directive.strip()
-        # Directive names are compared case sensitively after the substring
-        # tests above already lowered the header. A Script-Src directive is
-        # skipped by this loop entirely, and the star test inside matches a
-        # subdomain wildcard like *.example.com as if it were a bare star.
-        if directive.startswith("script-src") or directive.startswith("default-src"):
-            if "*" in directive:
-                findings.append(f"Warning: Wildcard (*) is used in '{directive}', which can be overly permissive.")
-            elif "'none'" not in directive and  not directive.endswith("'self'"):
-
-                #check if the script src is from un trusted origin
-                source_list = directive.split()
-                for source in source_list:
-                    source = source.strip()
-                    if source.startswith("http://") and not source.startswith("http://localhost") and not source.startswith("http://127.0.0.1"):
-                            findings.append(f"Warning:  '{source}' is used and script src is from un-trusted origin http")
-
-
-        if directive.startswith("object-src"):
-            if "*" in directive:
-                findings.append(f"Warning: Wildcard (*) is used in '{directive}', which can be overly permissive.")
-
-    #Check for base-uri usage.
-    if "base-uri" in csp_header.lower():
-       findings.append("Warning: base-uri is used which can be misconfigured.")
-
-    #check for report-uri.
-    if "report-uri" in csp_header.lower():
+    if csp_header.startswith("REPORT_ONLY: "):
+        findings.append("Warning: Only a report-only CSP header was found; report-only policies are not enforced.")
+        csp_header = csp_header[len("REPORT_ONLY: "):]
+    directives = {}
+    for part in csp_header.split(';'):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = part.split()
+        directives[tokens[0].lower()] = tokens[1:]
+    def effective(name):
+        return directives.get(name, directives.get("default-src", []))
+    script_sources = effective("script-src")
+    if "'unsafe-inline'" in script_sources:
+        findings.append("Warning: 'unsafe-inline' is used in script sources, which can allow inline script execution.")
+    if "'unsafe-eval'" in script_sources:
+        findings.append("Warning: 'unsafe-eval' is used in script sources, which can allow execution of strings as code.")
+    for name in ("script-src", "default-src", "img-src", "connect-src", "font-src", "media-src"):
+        if "data:" in directives.get(name, []):
+            findings.append(f"Warning: 'data:' is used as a source in '{name}', which is generally insecure and allows data injection attacks.")
+            break
+    for name in ("script-src", "default-src", "object-src"):
+        sources = directives.get(name, [])
+        if "*" in sources:
+            findings.append(f"Warning: Wildcard (*) is used in '{name}', which can be overly permissive.")
+        elif name in ("script-src", "default-src"):
+            for source in sources:
+                if source.startswith("http://") and not source.startswith("http://localhost") and not source.startswith("http://127.0.0.1"):
+                    findings.append(f"Warning: '{source}' is used and script src is from un-trusted origin http")
+    if "base-uri" in directives and "*" in directives["base-uri"]:
+        findings.append("Warning: base-uri uses a wildcard, which can be misconfigured.")
+    if "report-uri" in directives:
         findings.append("Info: report-uri is used, which can help in monitoring and enforcing CSP. Review endpoint security.")
-
     return findings
 
 
